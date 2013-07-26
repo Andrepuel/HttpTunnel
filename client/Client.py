@@ -3,10 +3,16 @@ import daemon
 import urllib.request
 import urllib.parse
 
+from client import http_client
+
 def server_action(host,action,post):
-	result = urllib.request.urlopen(host+'?'+urllib.parse.urlencode({"action":action}),urllib.parse.urlencode(post).encode('ascii')).read()
-	debug("Server action %s /action=%s with %r gave %r" % (host,action,post,result) )
-	return result
+	request = http_client.HTTPRequest(host,{"action":action},post)
+	result = b""
+	while True:
+		more = request.recv(daemon.BUFFER_SIZE)
+		if more == b"":
+			return result
+		result += more
 
 # Based on:
 """Minimal non-feature complete socks proxy""" #https://github.com/argandgahandapandpa/minimal_python_socks

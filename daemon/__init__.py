@@ -18,7 +18,7 @@ connections_pool = []
 connections_pool_nextfree = 0
 connections_pool_mutex = threading.Lock()
 
-BUFFER_SIZE=40960
+BUFFER_SIZE=4096
 
 def _recv_exactly(socket,size):
 	result = b""
