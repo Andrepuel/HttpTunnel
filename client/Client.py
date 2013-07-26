@@ -22,6 +22,7 @@ import datetime
 import time
 
 CLOSED = object()
+WAIT_TIME=0.001
 class SocketHttpTranslator(threading.Thread):
 	def __init__(self,host,result_number):
 		threading.Thread.__init__(self)
@@ -67,18 +68,19 @@ class SocketHttpTranslator(threading.Thread):
 
 	def run(self):
 		last_sent = datetime.datetime.now()
+		wait_time = 0
 		while True:
 			now = datetime.datetime.now()
 			to_send = b""
 			should_send = False
 			self.lock.acquire()
 			try:
-				if (now-last_sent).total_seconds() > 0.001 or len(self.data) > 1024 or self.closed:
+				if len(self.data) == 0 and self.closed:
+					to_send = CLOSED
+					should_send = True
+				elif (now-last_sent).total_seconds() >= wait_time or len(self.data) > 1024 or self.closed:
 					to_send = self.data
 					self.data = b""
-					should_send = True
-				elif len(self.data) == 0 and self.closed:
-					to_send = CLOSED
 					should_send = True
 			finally:
 				self.lock.release()
@@ -93,13 +95,16 @@ class SocketHttpTranslator(threading.Thread):
 				result = server_action(self.host,"sync",{"result_number":str(self.result_number),"data":to_send})
 			last_sent = datetime.datetime.now()
 
+			wait_time = WAIT_TIME
 			if result[0:1] == daemon.DATA:
 				(size,) = unpack(">I",result[1:5])
-				self.lock.acquire()
-				try:
-					self.recvd += result[5:5+size]
-				finally:
-					self.lock.release()
+				if size > 0:
+					wait_time = 0
+					self.lock.acquire()
+					try:
+						self.recvd += result[5:5+size]
+					finally:
+						self.lock.release()
 			elif result[0:1] == daemon.CONNECTION_CLOSED:
 				self.lock.acquire()
 				try:
