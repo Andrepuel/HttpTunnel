@@ -1,6 +1,5 @@
 import daemon
 
-import urllib.request
 import urllib.parse
 
 from client import http_client
@@ -29,9 +28,11 @@ import time
 
 CLOSED = object()
 WAIT_TIME=0.001
+BUFFER_SIZE=1024
 class SocketHttpTranslator(threading.Thread):
 	def __init__(self,host,result_number):
 		threading.Thread.__init__(self)
+		#TODO Do not overflow these
 		self.data = b""
 		self.recvd = b""
 		self.lock = threading.Lock()
@@ -46,7 +47,7 @@ class SocketHttpTranslator(threading.Thread):
 		try:
 			if self.closed:
 				raise IOError("Connection is closed, not allowed to send more data")
-			while len(self.data) >= daemon.BUFFER_SIZE:
+			while len(self.data) >= BUFFER_SIZE*4:
 				self.lock.release()
 				time.sleep(0)
 				self.lock.acquire()
@@ -84,7 +85,7 @@ class SocketHttpTranslator(threading.Thread):
 				if len(self.data) == 0 and self.closed:
 					to_send = CLOSED
 					should_send = True
-				elif (now-last_sent).total_seconds() >= wait_time or len(self.data) > 1024 or self.closed:
+				elif (now-last_sent).total_seconds() >= wait_time or len(self.data) > BUFFER_SIZE or self.closed:
 					to_send = self.data
 					self.data = b""
 					should_send = True
@@ -95,35 +96,45 @@ class SocketHttpTranslator(threading.Thread):
 			if not should_send:
 				time.sleep(0)
 				continue
+
 			if to_send is CLOSED:
-				result = server_action(self.host,"close",{"result_number":str(self.result_number)})
+				request = http_client.HTTPRequest(self.host,{"action":"close"},{"result_number":str(self.result_number)})
 			else:
-				result = server_action(self.host,"sync",{"result_number":str(self.result_number),"data":to_send})
-			last_sent = datetime.datetime.now()
+				request = http_client.HTTPRequest(self.host,{"action":"sync"},{"result_number":str(self.result_number),"data":to_send})
 
 			wait_time = WAIT_TIME
-			if result[0:1] == daemon.DATA:
-				(size,) = unpack(">I",result[1:5])
-				if size > 0:
-					wait_time = 0
+			while True:
+				result_type = request.recv(1)
+				if result_type == b'':
+					break
+				elif result_type == daemon.DATA:
+					(size,) = unpack(">I",daemon._recv_exactly(request,4))
+					if size > 0:
+						wait_time = 0
+						while size > 0:
+							result = request.recv(min(BUFFER_SIZE,size))
+							if result == b'':
+								raise IOError("Connection unexpectedly closed")
+							size -= len(result)
+							self.lock.acquire()
+							try:
+								self.recvd += result
+							finally:
+								self.lock.release()
+				elif result_type == daemon.CONNECTION_CLOSED:
 					self.lock.acquire()
 					try:
-						self.recvd += result[5:5+size]
+						self.remote_closed = True
 					finally:
 						self.lock.release()
-			elif result[0:1] == daemon.CONNECTION_CLOSED:
-				self.lock.acquire()
-				try:
-					self.remote_closed = True
-				finally:
-					self.lock.release()
-				return
-			elif result[0:1] == daemon.ERROR:
-				(size,) = unpack(">I",result[1:5])
-				raise BaseException("Error on http communication, server sent: %s" % result[5:5+size].decode("utf8"))
-			else:
-				raise BaseException("Server sent an unknown response (%r)" % result)
+					return
+				elif result_type == daemon.ERROR:
+					(size,) = unpack(">I",daemon._recv_exactly(requst,4))
+					raise BaseException("Error on http communication, server sent: %s" % daemon._recv_exactly(request,size).decode("utf8"))
+				else:
+					raise BaseException("Server sent an unknown response (%r)" % result)
 
+			last_sent = datetime.datetime.now()
 			if to_send is CLOSED:
 				return
 			
