@@ -1,5 +1,7 @@
 import socket
 import threading
+import time
+import datetime
 from struct import pack, unpack
 import traceback
 
@@ -29,16 +31,17 @@ def _recv_exactly(socket,size):
 		result += data
 	return result
 
-def _recv_if_has_data(socket):
+def _recv_if_has_data(socket,size=BUFFER_SIZE):
 	socket.setblocking(0)
 	try:
-		data = socket.recv(BUFFER_SIZE)
+		data = socket.recv(size)
 		socket.setblocking(1)
 		return (True,data)
 	except BlockingIOError:
 		socket.setblocking(1)
 		return (False,b"")
 	except ConnectionResetError:
+		socket.setblocking(1)
 		return (True,b"")
 
 def _recv_message(socket):
@@ -106,20 +109,20 @@ class Handler(threading.Thread):
 					raise IOError("This connection is closed")
 				self.conn.sendall(pack('>c',OKAY))
 				while True:
-					s_action = self.conn.recv(1)
-					if s_action == DATA:
-						(size,) = unpack('>I',self.recv_exactly(4))
-						if size > 0:
-							data_received = self.recv_exactly(size)
-							debug("Sending %s to real connection" % data_received)
-							new_conn.sendall(data_received)
-					elif s_action == CONNECTION_CLOSED:
-						info("Connection %r closed by peer" % result_number)
-						self.close_conn(result_number)
-					elif s_action == b'':
-						break
-					else:
-						raise IndexError("Invalid synchronize action (%r)" % s_action)
+					(has_data,s_action) = _recv_if_has_data(self.conn,1)
+					if has_data:
+						if s_action == DATA:
+							(size,) = unpack('>I',self.recv_exactly(4))
+							if size > 0:
+								data_received = self.recv_exactly(size)
+								new_conn.sendall(data_received)
+						elif s_action == CONNECTION_CLOSED:
+							info("Connection %r closed by peer" % result_number)
+							self.close_conn(result_number)
+						elif s_action == b'':
+							break
+						else:
+							raise IndexError("Invalid synchronize action (%r)" % s_action)
 
 					(has_data,back) = _recv_if_has_data(new_conn)
 					debug("Real connection has data? %r : %r" % (has_data,back))
@@ -129,9 +132,12 @@ class Handler(threading.Thread):
 						self.conn.sendall(pack('>c',CONNECTION_CLOSED))
 						self.conn.close()
 						return
-					self.conn.sendall(pack('>cI',DATA,len(back)))
+
 					if len(back) > 0:
+						self.conn.sendall(pack('>cI',DATA,len(back)))
 						self.conn.sendall(back)
+						
+					time.sleep(0)
 			else:
 				raise IndexError("Invalid action")
 		except BaseException as e:
@@ -166,8 +172,14 @@ class Client:
 	def __init__(self,result_number,port_number):
 		self.address = socket.getaddrinfo("localhost",port_number)[-1][4]
 		self.result_number = result_number
+		self.conn = None
 
 	def handshake(self):
+		if self.conn is None:
+			self.conn = self._handshake()
+		return self.conn
+
+	def _handshake(self):
 		conn = socket.socket(socket.AF_INET)
 		conn.connect(self.address)
 		conn.sendall(pack('>cI',SYNC_CONNECTION,self.result_number))
@@ -180,34 +192,47 @@ class Client:
 			raise BaseException("Unknown error on creating connection")
 		return conn
 
-	def send_recv(self,data):
+	def send(self,data):
 		conn = self.handshake()
 		conn.sendall(pack('>cI',DATA,len(data)))
 		if len(data) > 0:
 			conn.sendall(data)
-		result_action = conn.recv(1)
-		if result_action == DATA:
+	
+	def recv(self):
+		conn = self.handshake()
+		#TODO refactor magic numbers
+
+		MAX_TIME=1
+		start = datetime.datetime.now()
+		while (datetime.datetime.now()-start).total_seconds() < MAX_TIME:
+			has_data,action = _recv_if_has_data(conn,1)
+			if has_data:
+				break
+		if action == DATA:
 			(size,) = unpack('>I',_recv_exactly(conn,4))
 			data = b""
 			if size > 0:
 				data = _recv_exactly(conn,size)
-			conn.close()
 			return data
-		elif result_action == ERROR:
+		elif action == ERROR:
 			msg = _recv_message(conn)
-			conn.close()
 			raise BaseException("Error on receiving data (%s) " % msg.decode("utf8"))
-		elif result_action == CONNECTION_CLOSED:
-			conn.close()
+		elif action == CONNECTION_CLOSED:
 			return CONNECTION_CLOSED
+		elif action == b'':
+			self.conn = None
+			return b""
 		else:
-			conn.close()
 			raise IndexError("Received invalid response (%r)" % result_action)
 
+	def done(self):
+		if self.conn is None:
+			return
+		self.conn.close()
+	
 	def close(self):
 		conn = self.handshake()
 		conn.sendall(pack('>c',CONNECTION_CLOSED))
-		conn.close()
 
 class SocksDaemon:
 	def __init__(self,port_number):

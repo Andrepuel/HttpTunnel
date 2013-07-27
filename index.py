@@ -8,8 +8,11 @@ import sys
 import os
 from struct import pack,unpack
 import traceback
+from time import sleep
+from datetime import datetime
 
 DAEMON_PORT=7008
+MAX_TIME=1
 
 def send_error(traceback_str):
 	eStr = str(traceback_str).encode('utf8')
@@ -25,21 +28,37 @@ class Tunnel(server.ServerAction):
 			client = daemon.Client.connect(DAEMON_PORT,dest_address,int(dest_port))
 			sys.stdout.write(daemon.OKAY)
 			sys.stdout.write(pack(">I",client.result_number))
+			client.done()
 		except BaseException as e:
 			send_error(traceback.format_exc())
 	
-	def action_sync(self,post):
+	def action_send(self,post):
 		try:
 			result_number = int(post["result_number"])
 			client = daemon.Client(result_number,DAEMON_PORT)
-			for i in range(128):
-				result = client.send_recv(post["data"])
+			client.send(post["data"])
+			client.done()
+		except BaseException as e:
+			send_error(traceback.format_exc())
+
+	def action_recv(self,post):
+		try:
+			result_number = int(post["result_number"])
+			client = daemon.Client(result_number,DAEMON_PORT)
+
+			start = datetime.now()
+			while (datetime.now()-start).total_seconds() < MAX_TIME:
+				result = client.recv()
 				if result is daemon.CONNECTION_CLOSED:
 					sys.stdout.write(daemon.CONNECTION_CLOSED)
 					return
 				sys.stdout.write(daemon.DATA)
 				sys.stdout.write(pack(">I",len(result)))
 				sys.stdout.write(result)
+				if( len(result) == 0 ):
+					break
+				sleep(0)
+			client.done()
 		except BaseException as e:
 			send_error(traceback.format_exc())
 
@@ -47,14 +66,8 @@ class Tunnel(server.ServerAction):
 		try:
 			result_number = int(post["result_number"])
 			client = daemon.Client(result_number,DAEMON_PORT)
-			result = client.send_recv(b"")
 			client.close()
-			if result is daemon.CONNECTION_CLOSED:
-				sys.stdout.write(daemon.CONNECTION_CLOSED)
-				return
-			sys.stdout.write(daemon.DATA)
-			sys.stdout.write(pack(">I",len(result)))
-			sys.stdout.write(result)
+			client.done()
 		except BaseException as e:
 			send_error(traceback.format_exc())
 

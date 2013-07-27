@@ -97,17 +97,19 @@ class SocketHttpTranslator(threading.Thread):
 				time.sleep(0)
 				continue
 
-			if to_send is CLOSED:
-				request = http_client.HTTPRequest(self.host,{"action":"close"},{"result_number":str(self.result_number)})
-			else:
-				request = http_client.HTTPRequest(self.host,{"action":"sync"},{"result_number":str(self.result_number),"data":to_send})
+			if not to_send is CLOSED and len(to_send) > 0:
+				print("Sent %s"%len(to_send))
+				server_action(self.host,"send",{"result_number":str(self.result_number),"data":to_send})
+			request = http_client.HTTPRequest(self.host,{"action":"recv"},{"result_number":str(self.result_number)})
 
 			wait_time = WAIT_TIME
+			repeats = 0
 			while True:
 				result_type = request.recv(1)
 				if result_type == b'':
 					break
-				elif result_type == daemon.DATA:
+				repeats+=1
+				if result_type == daemon.DATA:
 					(size,) = unpack(">I",daemon._recv_exactly(request,4))
 					if size > 0:
 						wait_time = 0
@@ -129,13 +131,14 @@ class SocketHttpTranslator(threading.Thread):
 						self.lock.release()
 					return
 				elif result_type == daemon.ERROR:
-					(size,) = unpack(">I",daemon._recv_exactly(requst,4))
+					(size,) = unpack(">I",daemon._recv_exactly(request,4))
 					raise BaseException("Error on http communication, server sent: %s" % daemon._recv_exactly(request,size).decode("utf8"))
 				else:
 					raise BaseException("Server sent an unknown response (%r)" % result)
-
+			print("HTTP gave %s chunks"%repeats)
 			last_sent = datetime.datetime.now()
 			if to_send is CLOSED:
+				server_action(self.host,"close",{"result_number":str(self.result_number)})
 				return
 			
 
