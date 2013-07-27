@@ -162,6 +162,7 @@ class Handler(threading.Thread):
 				pass
 		self.conn.close()
 
+# Due to Client's modifications over the time, each instance may only send or receive data
 class Client:
 	@staticmethod
 	def connect(port_number,dest_address,dest_port):
