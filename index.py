@@ -32,13 +32,14 @@ class Tunnel(server.ServerAction):
 		try:
 			result_number = int(post["result_number"])
 			client = daemon.Client(result_number,DAEMON_PORT)
-			result = client.send_recv(post["data"])
-			if result is daemon.CONNECTION_CLOSED:
-				sys.stdout.write(daemon.CONNECTION_CLOSED)
-				return
-			sys.stdout.write(daemon.DATA)
-			sys.stdout.write(pack(">I",len(result)))
-			sys.stdout.write(result)
+			for i in range(128):
+				result = client.send_recv(post["data"])
+				if result is daemon.CONNECTION_CLOSED:
+					sys.stdout.write(daemon.CONNECTION_CLOSED)
+					return
+				sys.stdout.write(daemon.DATA)
+				sys.stdout.write(pack(">I",len(result)))
+				sys.stdout.write(result)
 		except BaseException as e:
 			send_error(traceback.format_exc())
 
