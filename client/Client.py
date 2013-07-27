@@ -94,8 +94,8 @@ class DataBuffer:
 class SocketHttpTranslator(threading.Thread):
 	def __init__(self,host,result_number):
 		threading.Thread.__init__(self)
-		self.send_buffer = DataBuffer()
-		self.recv_buffer = DataBuffer()
+		self.send_buffer = DataBuffer(BUFFER_SIZE*128)
+		self.recv_buffer = DataBuffer(BUFFER_SIZE*128)
 		self.remote_closed = False
 
 		self.host = host

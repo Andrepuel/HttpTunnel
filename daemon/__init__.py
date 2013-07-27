@@ -15,6 +15,7 @@ OKAY=b'\x03'
 ERROR=b'\x04'
 DATA=b'\x05'
 CONNECTION_CLOSED=b'\x06'
+RECEIVE=b'\x07'
 
 connections_pool = []
 connections_pool_nextfree = 0
@@ -31,18 +32,19 @@ def _recv_exactly(socket,size):
 		result += data
 	return result
 
-def _recv_if_has_data(socket,size=BUFFER_SIZE):
-	socket.setblocking(0)
+def _recv_if_has_data(conn,size=BUFFER_SIZE,timeout=0.0):
+	conn.settimeout(timeout)
 	try:
-		data = socket.recv(size)
-		socket.setblocking(1)
+		data = conn.recv(size)
 		return (True,data)
+	except socket.timeout:
+		return (False,b"")
 	except BlockingIOError:
-		socket.setblocking(1)
 		return (False,b"")
 	except ConnectionResetError:
-		socket.setblocking(1)
 		return (True,b"")
+	finally:
+		conn.settimeout(None)
 
 def _recv_message(socket):
 	msg = b""
@@ -109,47 +111,55 @@ class Handler(threading.Thread):
 					raise IOError("This connection is closed")
 				self.conn.sendall(pack('>c',OKAY))
 				while True:
-					(has_data,s_action) = _recv_if_has_data(self.conn,1)
-					if has_data:
-						if s_action == DATA:
-							(size,) = unpack('>I',self.recv_exactly(4))
-							if size > 0:
-								data_received = self.recv_exactly(size)
-								new_conn.sendall(data_received)
-						elif s_action == CONNECTION_CLOSED:
-							info("Connection %r closed by peer" % result_number)
-							self.close_conn(result_number)
-						elif s_action == b'':
-							break
-						else:
-							raise IndexError("Invalid synchronize action (%r)" % s_action)
+					s_action = self.conn.recv(1)
+					if s_action == DATA or s_action == CONNECTION_CLOSED or s_action == b'':
+						while True:
+							if s_action == DATA:
+								(size,) = unpack('>I',self.recv_exactly(4))
+								if size > 0:
+									data_received = self.recv_exactly(size)
+									new_conn.sendall(data_received)
+							elif s_action == CONNECTION_CLOSED:
+								info("Connection %r closed by peer" % result_number)
+								print("Connection closed, dont send data anymore")
+								self.close_conn(result_number)
+								return
+							elif s_action == b'':
+								return
+							else:
+								raise IndexError("Invalid synchronize action (%r)" % s_action)
+							s_action = self.conn.recv(1)
 
-					try:
-						(has_data,back) = _recv_if_has_data(new_conn)
-					except OSError:
-						self.conn.sendall.pack('>cI',DATA,0)
-						self.conn.close()
+					if s_action == RECEIVE:
+						while True:
+							(has_data,finish) = _recv_if_has_data(self.conn,1)
+							if has_data and finish == b'':
+								self.conn.close()
+								return
+							(has_data,back) = _recv_if_has_data(new_conn,timeout=0.1)
 
-					debug("Real connection has data? %r : %r" % (has_data,back))
-					if back == b'' and has_data:
-						info("Connection %r closed by real connection" % result_number)
-						self.close_conn(result_number)
-						self.conn.sendall(pack('>c',CONNECTION_CLOSED))
-						self.conn.close()
-						return
+							if back == b'' and has_data:
+								info("Connection %r closed by real connection" % result_number)
+								self.close_conn(result_number)
+								self.conn.sendall(pack('>c',CONNECTION_CLOSED))
+								self.conn.close()
+								return
 
-					if len(back) > 0:
-						self.conn.sendall(pack('>cI',DATA,len(back)))
-						self.conn.sendall(back)
-						
-					time.sleep(0)
+							if len(back) > 0:
+								self.conn.sendall(pack('>cI',DATA,len(back)))
+								self.conn.sendall(back)
+							else:	
+								time.sleep(0.1)
 			else:
 				raise IndexError("Invalid action")
 		except BaseException as e:
+			traceback.print_exc()
 			eStr = str(traceback.format_exc())
-			error("Sending error message "+eStr)
-			self.conn.sendall(pack('>cI',ERROR,len(eStr)))
-			self.conn.sendall(eStr.encode('utf8'))
+			try:
+				self.conn.sendall(pack('>cI',ERROR,len(eStr)))
+				self.conn.sendall(eStr.encode('utf8'))
+			except IOError:
+				pass
 		self.conn.close()
 
 class Client:
@@ -204,9 +214,12 @@ class Client:
 			conn.sendall(data)
 	
 	def recv(self):
-		conn = self.handshake()
+		if self.conn is None:
+			conn = self.handshake()
+			conn.sendall(pack('>c',RECEIVE))
+		else:
+			conn = self.handshake()
 		#TODO refactor magic numbers
-
 		MAX_TIME=1
 		start = datetime.datetime.now()
 		while (datetime.datetime.now()-start).total_seconds() < MAX_TIME:
