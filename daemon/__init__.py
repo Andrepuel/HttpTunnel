@@ -124,7 +124,12 @@ class Handler(threading.Thread):
 						else:
 							raise IndexError("Invalid synchronize action (%r)" % s_action)
 
-					(has_data,back) = _recv_if_has_data(new_conn)
+					try:
+						(has_data,back) = _recv_if_has_data(new_conn)
+					except OSError:
+						self.conn.sendall.pack('>cI',DATA,0)
+						self.conn.close()
+
 					debug("Real connection has data? %r : %r" % (has_data,back))
 					if back == b'' and has_data:
 						info("Connection %r closed by real connection" % result_number)

@@ -12,7 +12,7 @@ from time import sleep
 from datetime import datetime
 
 DAEMON_PORT=7008
-MAX_TIME=1
+MAX_TIME=10
 
 def send_error(traceback_str):
 	eStr = str(traceback_str).encode('utf8')

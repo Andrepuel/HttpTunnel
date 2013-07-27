@@ -29,87 +29,122 @@ import time
 CLOSED = object()
 WAIT_TIME=0.001
 BUFFER_SIZE=1024
+
+class DataBuffer:
+	def __init__(self,max_size=BUFFER_SIZE*4):
+		self.lock = threading.Condition()
+		self.data = b""
+		self.max_size=max_size
+
+	def length(self):
+		self.lock.acquire()
+		try:
+			return len(self.data)
+		finally:
+			self.lock.release()
+
+	def get(self):
+		self.lock.acquire()
+		try:
+			while not self.data is CLOSED and len(self.data) == 0:
+				self.lock.wait()
+			if self.data is CLOSED:
+				return b""
+			result = self.data
+			self.data = b""
+			return result
+		finally:
+			self.lock.notifyAll()
+			self.lock.release()
+	
+	def append(self,data):
+		while True:
+			self.lock.acquire()
+			if self.data is CLOSED:
+				raise RuntimeError("Buffer is closed")
+			i=0
+			try:
+				remaining = self.max_size-len(self.data)
+				if remaining > 0:
+					self.data += data[i:i+remaining]
+					i += remaining
+				if i >= len(data):
+					return
+			finally:
+				self.lock.notifyAll()
+				self.lock.release()
+	
+	def close(self):
+		self.lock.acquire()
+		try:
+			while not self.data is CLOSED and len(self.data) > 0:
+				self.lock.wait()
+			self.data = CLOSED
+			self.lock.notifyAll()
+		finally:
+			self.lock.release()
+	
+	def is_closed(self):
+		self.lock.acquire()
+		try:
+			return self.data is CLOSED
+		finally:
+			self.lock.release()
+
 class SocketHttpTranslator(threading.Thread):
 	def __init__(self,host,result_number):
 		threading.Thread.__init__(self)
-		#TODO Do not overflow these
-		self.data = b""
-		self.recvd = b""
-		self.lock = threading.Lock()
-		self.closed = False
+		self.send_buffer = DataBuffer()
+		self.recv_buffer = DataBuffer()
 		self.remote_closed = False
 
 		self.host = host
 		self.result_number = result_number
 
+	def is_closed(self):
+		return self.send_buffer.is_closed() or self.recv_buffer.is_closed()
+
+	def start(self):
+		sender = threading.Thread(target=self.send_thread)
+		sender.start()
+		threading.Thread.start(self)
+
 	def send(self,data):
-		self.lock.acquire()
-		try:
-			if self.closed:
-				raise IOError("Connection is closed, not allowed to send more data")
-			while len(self.data) >= BUFFER_SIZE*4:
-				self.lock.release()
-				time.sleep(0)
-				self.lock.acquire()
-			self.data += data
-		finally:
-			self.lock.release()
+		self.send_buffer.append(data)
 
 	def send_close(self):
-		self.lock.acquire()
-		try:
-			self.closed = True
-		finally:
-			self.lock.release()
+		self.send_buffer.close()
 
 	def recv(self):
-		self.lock.acquire()
-		try:
-			if len(self.recvd) == 0:
-				return (self.remote_closed,b"")
-			result = self.recvd
-			self.recvd = b""
-			return (True,result)
-		finally:
-			self.lock.release()
+		return self.recv_buffer.get()
 
 	def run(self):
+		self.recv_thread()
+
+	def send_thread(self):
+		while True:
+			to_send = self.send_buffer.get()
+			if to_send == b"":
+				#Receiver closes
+				return
+			else:
+				server_action(self.host,"send",{"result_number":self.result_number,"data":to_send})
+
+	def recv_thread(self):
 		last_sent = datetime.datetime.now()
 		wait_time = 0
 		while True:
 			now = datetime.datetime.now()
-			to_send = b""
-			should_send = False
-			self.lock.acquire()
-			try:
-				if len(self.data) == 0 and self.closed:
-					to_send = CLOSED
-					should_send = True
-				elif (now-last_sent).total_seconds() >= wait_time or len(self.data) > BUFFER_SIZE or self.closed:
-					to_send = self.data
-					self.data = b""
-					should_send = True
-			finally:
-				self.lock.release()
-
-			result = b""
-			if not should_send:
+			if (now-last_sent).total_seconds() < wait_time:
 				time.sleep(0)
 				continue
-
-			if not to_send is CLOSED and len(to_send) > 0:
-				print("Sent %s"%len(to_send))
-				server_action(self.host,"send",{"result_number":str(self.result_number),"data":to_send})
 			request = http_client.HTTPRequest(self.host,{"action":"recv"},{"result_number":str(self.result_number)})
-
 			wait_time = WAIT_TIME
-			repeats = 0
 			while True:
 				result_type = request.recv(1)
 				if result_type == b'':
 					break
-				repeats+=1
-				if result_type == daemon.DATA:
+				elif result_type == daemon.DATA:
 					(size,) = unpack(">I",daemon._recv_exactly(request,4))
 					if size > 0:
 						wait_time = 0
@@ -118,29 +153,20 @@ class SocketHttpTranslator(threading.Thread):
 							if result == b'':
 								raise IOError("Connection unexpectedly closed")
 							size -= len(result)
-							self.lock.acquire()
-							try:
-								self.recvd += result
-							finally:
-								self.lock.release()
+							self.recv_buffer.append(result)
 				elif result_type == daemon.CONNECTION_CLOSED:
-					self.lock.acquire()
-					try:
-						self.remote_closed = True
-					finally:
-						self.lock.release()
-					return
+					self.recv_buffer.close()
+					self.send_buffer.close()
 				elif result_type == daemon.ERROR:
 					(size,) = unpack(">I",daemon._recv_exactly(request,4))
 					raise BaseException("Error on http communication, server sent: %s" % daemon._recv_exactly(request,size).decode("utf8"))
 				else:
-					raise BaseException("Server sent an unknown response (%r)" % result)
-			print("HTTP gave %s chunks"%repeats)
+					raise BaseException("Server sent an unknown response %r" % (result_type+request.recv(4096)))
 			last_sent = datetime.datetime.now()
-			if to_send is CLOSED:
-				server_action(self.host,"close",{"result_number":str(self.result_number)})
+			if self.send_buffer.is_closed():
+				server_action(self.host,"close",{"result_number":self.result_number})
+				self.recv_buffer.close()
 				return
-			
 
 CLOSE = object()
 
@@ -154,24 +180,25 @@ IPV6 = b'\x04'
 DOMAIN_NAME = b'\x03'
 SUCCESS = b'\x00'
 
+def backward(local_source,http):
+	while True:
+		data = local_source.recv(BUFFER_SIZE)
+		if data == b'':
+			http.send_close()
+			local_source.close()
+			return
+		else:
+			http.send(data)
+
+
 def forward(local_source, http):
 	while True:
-		(has_data,data) = daemon._recv_if_has_data(local_source)
-		if has_data:
-			if data == b'':
-				http.send_close()
-				local_source.close()
-				return
-			else:
-				http.send(data)
-		(has_data,data) = http.recv()
-		if has_data:
-			if data == b'':
-				local_source.close()
-				return
-			else:
-				local_source.sendall(data)
-		time.sleep(0.001)
+		data = http.recv()
+		if data == b'':
+			local_source.close()
+			return
+		else:
+			local_source.sendall(data)
 
 class SocksHandler(StreamRequestHandler):
 	"""Highly feature incomplete SOCKS 5 implementation"""
@@ -266,6 +293,8 @@ class SocksHandler(StreamRequestHandler):
 
 		http = SocketHttpTranslator(http_address,result_number)
 		http.start()
+		back = threading.Thread(target=backward,args=(self.request,http))
+		back.start()
 		forward(self.request, http)
 
 	def send_reply(self,host,port):
