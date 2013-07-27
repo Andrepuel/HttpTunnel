@@ -36,7 +36,7 @@ class ChunkedRecvMode:
 				self.actual_chunk_size = -1
 				return b""
 			self.actual_chunk_size = int(line,16)
-			if self.actual_chunk_size == -1:
+			if self.actual_chunk_size == 0:
 				self.actual_chunk_size = -1
 				return b""
 			return self.recv(bufsize)
@@ -45,6 +45,9 @@ class ChunkedRecvMode:
 		else:
 			received = self.conn.recv(min(bufsize,self.actual_chunk_size))
 			self.actual_chunk_size -= len(received)
+			if self.actual_chunk_size == 0:
+				end_line = _get_line(self.conn)
+				assert end_line == b''
 			return received
 
 class HTTPRequest:
